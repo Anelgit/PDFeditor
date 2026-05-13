@@ -374,68 +374,65 @@ class PDFDocument:
                          bg: tuple[float, float, float] = (1, 1, 1)) -> int:
         """Replace every occurrence of `needle` across the document.
 
-        Substrings inside spans are matched too. Width-preservation isn't
-        guaranteed — if the replacement is wider than the original, it may
-        visually overflow into adjacent text. Returns the number of substitutions.
+        Uses PyMuPDF's `search_for` for precise per-match rects (so we only
+        redact the matched text, not its neighbours). Font/size/colour are
+        inherited from whichever span contains the match. Width preservation
+        isn't guaranteed: if `replacement` is wider than `needle`, it may
+        visually overlap adjacent text. Returns the number of substitutions.
         """
         if not needle:
             return 0
         self.snapshot()
         count = 0
-        cmp_needle = needle if case_sensitive else needle.lower()
         for page_idx in range(self.page_count):
             page = self.doc[page_idx]
-            # Collect substitutions for this page, then apply redactions once.
-            jobs: list[tuple[fitz.Rect, fitz.Point, str, float, tuple, int]] = []
-            for block in page.get_text("dict").get("blocks", []):
-                if block.get("type") != 0:
-                    continue
-                for line in block.get("lines", []):
-                    for sp in line.get("spans", []):
-                        text = sp.get("text", "")
-                        hay = text if case_sensitive else text.lower()
-                        if cmp_needle not in hay:
-                            continue
-                        # Find every match position in this span and compute its rect.
-                        # Estimate per-character width from the span bbox.
-                        bbox = fitz.Rect(sp["bbox"])
-                        if not text:
-                            continue
-                        char_w = bbox.width / max(len(text), 1)
-                        origin = sp.get("origin", (bbox.x0, bbox.y1))
-                        fontsize = float(sp.get("size", 12.0))
-                        color_int = int(sp.get("color", 0))
-                        color = (
-                            ((color_int >> 16) & 0xFF) / 255.0,
-                            ((color_int >> 8) & 0xFF) / 255.0,
-                            (color_int & 0xFF) / 255.0,
+            try:
+                rects = page.search_for(needle)
+            except Exception:
+                rects = []
+            if not case_sensitive:
+                # search_for is already case-insensitive; nothing extra to do.
+                pass
+            else:
+                # Filter to exact-case matches by re-checking each rect's text.
+                exact = []
+                for r in rects:
+                    if page.get_textbox(r) == needle:
+                        exact.append(r)
+                rects = exact
+            if not rects:
+                continue
+            spans = self.spans_on_page(page_idx)
+
+            def style_for(r: fitz.Rect):
+                cx, cy = (r.x0 + r.x1) / 2, (r.y0 + r.y1) / 2
+                for sp in spans:
+                    if sp.bbox.x0 <= cx <= sp.bbox.x1 and sp.bbox.y0 <= cy <= sp.bbox.y1:
+                        return (
+                            sp.fontsize,
+                            sp.color,
+                            _pick_base14(sp.fontname, sp.flags),
+                            sp.origin[1],
                         )
-                        fontname = _pick_base14(sp.get("font", ""), int(sp.get("flags", 0)))
-                        start = 0
-                        while True:
-                            i = hay.find(cmp_needle, start)
-                            if i < 0:
-                                break
-                            x0 = bbox.x0 + i * char_w
-                            x1 = bbox.x0 + (i + len(needle)) * char_w
-                            redact_rect = fitz.Rect(x0, bbox.y0, x1, bbox.y1)
-                            insert_pt = fitz.Point(x0, origin[1])
-                            jobs.append((redact_rect, insert_pt, replacement,
-                                         fontsize, color, fontname))
-                            start = i + len(needle)
-                            count += 1
-            for redact_rect, _, _, _, _, _ in jobs:
-                page.add_redact_annot(redact_rect, fill=bg)
-            if jobs:
-                page.apply_redactions()
-            for _, insert_pt, repl, fontsize, color, fontname in jobs:
+                return (12.0, (0.0, 0.0, 0.0), "helv", r.y1 - r.height * 0.18)
+
+            jobs = []
+            for r in rects:
+                fontsize, color, fontname, baseline_y = style_for(r)
+                jobs.append((r, fitz.Point(r.x0, baseline_y), replacement,
+                             fontsize, color, fontname))
+                count += 1
+            for r, *_ in jobs:
+                page.add_redact_annot(r, fill=bg)
+            page.apply_redactions()
+            for _, pt, repl, fontsize, color, fontname in jobs:
                 if not repl:
                     continue
                 try:
-                    page.insert_text(insert_pt, repl, fontname=fontname,
+                    page.insert_text(pt, repl, fontname=fontname,
                                      fontsize=fontsize, color=color)
                 except Exception:
-                    page.insert_text(insert_pt, repl, fontname="helv",
+                    page.insert_text(pt, repl, fontname="helv",
                                      fontsize=fontsize, color=color)
         return count
 
