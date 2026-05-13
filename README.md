@@ -33,4 +33,6 @@ The pdfeditor project is designed to provide a simple and efficient way to edit 
 ## Usage
 To use the pdfeditor, run the main application script. Ensure that you have the necessary permissions to access and modify the PDF files you wish to edit.
 
-For more detailed usage instructions, refer to the documentation provided within the project or consult the help command within the application.
+For more detailed usage instructions, refer to the documentation provided within the project or consult the help command within the application.  
+
+
